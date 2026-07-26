@@ -6,12 +6,14 @@
 //! compositor advertises `zwp_virtual_keyboard_manager_v1`.
 //!
 //! Why this exists: `wtype` synthesises keystrokes via that protocol.
-//! KWin, wlroots (sway / Hyprland), and a handful of others implement
-//! it; **Mutter (GNOME-Wayland) does not** (as of GNOME 46). Calling
-//! `which("wtype").is_some()` is therefore a false positive on GNOME
-//! — `wtype` runs, prints nothing, and the keystrokes are silently
-//! dropped by the compositor. The probe replaces that heuristic with
-//! a direct registry walk.
+//! wlroots compositors (sway / Hyprland / river / niri) implement it,
+//! but **neither Mutter (GNOME-Wayland) nor KWin (KDE-Wayland) does**
+//! — verified on GNOME 46 and Plasma 6.7. Calling
+//! `which("wtype").is_some()` is therefore a false positive on both
+//! desktops: on GNOME `wtype` runs, prints nothing, and the keystrokes
+//! are silently dropped; on KWin it exits 1 with "Compositor does not
+//! support the virtual keyboard protocol". The probe replaces that
+//! heuristic with a direct registry walk.
 //!
 //! Cost: one transient Wayland connection, ~5–15 ms on a warm
 //! compositor. The result is cached process-lifetime in a `OnceLock`.

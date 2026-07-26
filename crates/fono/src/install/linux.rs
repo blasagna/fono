@@ -1270,8 +1270,12 @@ pub enum Session {
     /// virtual-keyboard are implemented natively — recommend `wtype`
     /// only.
     WlrootsWayland,
-    /// Native Wayland session under KDE Plasma's KWin. KWin
-    /// implements both protocols Fono needs (Plasma 5.27+).
+    /// Native Wayland session under KDE Plasma's KWin. KWin implements
+    /// `zwlr_layer_shell_v1` (so the overlay is native) but *not*
+    /// `zwp_virtual_keyboard_manager_v1` — verified on Plasma 6.7,
+    /// where `wtype` exits 1 with "Compositor does not support the
+    /// virtual keyboard protocol". Typing therefore needs `ydotool`
+    /// (all apps) or `xdotool` (Xwayland clients only).
     KdeWayland,
     /// Pure X11 session (no `WAYLAND_DISPLAY`). Recommend `xdotool`
     /// + `libxkbcommon-x11`.
@@ -1357,7 +1361,19 @@ impl Session {
             // Native Wayland with both protocols — layer-shell
             // overlay + virtual-keyboard typing work directly. No
             // Xwayland dependency on the hot path.
-            Self::WlrootsWayland | Self::KdeWayland => vec![Pkg::Wtype],
+            Self::WlrootsWayland => vec![Pkg::Wtype],
+            // KWin does NOT implement zwp_virtual_keyboard_manager_v1,
+            // so `wtype` exits 1 with "Compositor does not support the
+            // virtual keyboard protocol" and Fono's registry probe
+            // (`fono-inject::wayland_probe`) correctly refuses to select
+            // it. Recommending it here sent KDE users to install a tool
+            // Fono would then decline to use. `xdotool` at least types
+            // into Xwayland clients; full native-Wayland coverage needs
+            // `ydotool`, which is excluded from Pkg on purpose (see the
+            // enum doc — the binary alone is useless without a uinput
+            // daemon we cannot safely automate) and is instead called
+            // out in `recommend_injector`.
+            Self::KdeWayland => vec![Pkg::LibxkbcommonX11, Pkg::Xdotool],
         }
     }
 
@@ -1378,10 +1394,17 @@ impl Session {
                  on this session). `ydotool` also works on any Wayland session but \
                  requires a uinput daemon you set up yourself."
             }
-            Self::WlrootsWayland | Self::KdeWayland => {
+            Self::WlrootsWayland => {
                 "Install `wtype` to enable auto-typing on this Wayland session. \
                  `ydotool` is a universal alternative but requires a uinput daemon \
                  you set up yourself."
+            }
+            Self::KdeWayland => {
+                "KWin does not implement the virtual-keyboard protocol, so `wtype` \
+                 cannot type on this session even when installed. Use `ydotool` for \
+                 auto-typing in all apps — it requires a uinput daemon you set up \
+                 yourself (run `ydotoold` and point `YDOTOOL_SOCKET` at its socket). \
+                 `xdotool` is a lighter option but only reaches Xwayland windows."
             }
         }
     }
@@ -1401,7 +1424,8 @@ enum Pkg {
     Xdotool,
     /// `wtype` — Fono's key-injection backend on Wayland
     /// compositors that implement `zwp_virtual_keyboard_manager_v1`
-    /// (wlroots family + KWin).
+    /// (the wlroots family). Neither KWin nor Mutter does, so this
+    /// is never recommended on KDE or GNOME.
     Wtype,
 }
 
@@ -2251,7 +2275,10 @@ mod tests {
             ("XDG_SESSION_TYPE", "wayland"),
         ]));
         assert_eq!(s, Session::KdeWayland);
-        assert_eq!(s.desired_packages(), vec![Pkg::Wtype]);
+        // Never `wtype` on KDE: KWin lacks zwp_virtual_keyboard_manager_v1,
+        // so the runtime probe would decline the very tool we installed.
+        assert_eq!(s.desired_packages(), vec![Pkg::LibxkbcommonX11, Pkg::Xdotool]);
+        assert!(!s.desired_packages().contains(&Pkg::Wtype));
     }
 
     #[test]
@@ -2302,7 +2329,12 @@ mod tests {
         assert!(Session::GnomeWayland.recommend_injector().contains("xdotool"));
         assert!(Session::X11.recommend_injector().contains("xdotool"));
         assert!(Session::WlrootsWayland.recommend_injector().contains("wtype"));
-        assert!(Session::KdeWayland.recommend_injector().contains("wtype"));
+        // KDE must be steered to ydotool. The text may still name wtype
+        // (to explain why it cannot work), so assert on the actionable
+        // recommendation rather than mere absence of the word.
+        let kde = Session::KdeWayland.recommend_injector();
+        assert!(kde.contains("ydotool"));
+        assert!(kde.contains("does not implement"));
     }
 
     // -----------------------------------------------------------------
