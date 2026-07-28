@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The recording overlay no longer disappears after the first dictation on
+  Wayland.** On compositors using the layer-shell overlay (KDE Plasma, sway,
+  Hyprland), hiding the overlay left it in a state where the next attempt to
+  show it broke the connection to the compositor. The first dictation drew the
+  overlay normally and every later one ran without it — audio, transcription,
+  and typing were unaffected — until the daemon was restarted. The overlay now
+  comes back for every dictation.
+
 ## [0.17.1] — 2026-07-22
 
 ### Changed

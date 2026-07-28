@@ -175,6 +175,24 @@ impl LayerState {
         }
     }
 
+    /// Re-map after a hide. Attaching a null buffer (see
+    /// [`ShmCanvas::unmap`]) returns the layer surface to its initial,
+    /// unconfigured state: the protocol then requires a buffer-free
+    /// commit and a fresh `configure` before any buffer may be attached
+    /// again. Painting straight into the old configuration earns a
+    /// `zwlr_layer_surface_v1` `invalid_surface_state` (error 0), which
+    /// kills the connection and takes the overlay thread with it.
+    fn remap(&mut self) {
+        let h = self.renderer.target_logical_height().round() as u32;
+        let w = WIN_WIDTH as u32;
+        self.layer.set_size(w, h);
+        self.canvas.set_dimensions(w, h);
+        self.pending_size = None;
+        // Buffer-free commit: the compositor answers with a configure,
+        // which flips `configured` and drives the first paint.
+        self.layer.commit();
+    }
+
     fn paint(&mut self) {
         if !self.configured {
             return;
@@ -348,11 +366,21 @@ fn run_loop(
         // 2. Apply size / visibility transitions.
         if drain.needs_resize {
             if state.renderer.is_visible() {
-                state.request_resize();
+                if state.configured {
+                    state.request_resize();
+                } else {
+                    // Coming back from a hide: the surface is unmapped
+                    // and unconfigured, so it needs the buffer-free
+                    // commit / configure handshake before it can paint.
+                    state.remap();
+                }
             } else {
                 // Hidden: unmap the surface so the compositor stops
-                // drawing the rounded panel entirely.
+                // drawing the rounded panel entirely. The surface drops
+                // back to unconfigured — painting before the next
+                // configure is a protocol error.
                 ShmCanvas::unmap(state.layer.wl_surface());
+                state.configured = false;
             }
         }
         if drain.needs_redraw && state.renderer.is_visible() {
