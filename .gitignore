@@ -42,3 +42,9 @@ secrets.toml
 # scripts/mac-remote.sh or scripts/win-remote.sh.
 .env.hosts.local
 
+# Claude Code per-machine state. settings.local.json is a personal
+# permission allowlist (project-wide settings belong in the tracked
+# .claude/settings.json); worktrees/ holds throwaway git worktrees.
+.claude/settings.local.json
+.claude/worktrees/
+
