@@ -73,6 +73,17 @@ pub fn whisper_dest(paths: &Paths, name: &str, quant: Quantization) -> PathBuf {
     paths.whisper_models_dir().join(ModelRegistry::filename(name, quant))
 }
 
+/// Whether the startup preflight should fetch `[polish.local].model`.
+/// Both the on/off switch and the backend selector must agree: a config
+/// that pins `backend = "local"` but leaves `enabled = false` never runs
+/// the cleanup pass, so pulling several hundred MB of weights for it is
+/// pure waste. Mirrors the assistant's `enabled && backend` gate in
+/// [`ensure_models`]. Pure predicate — does not touch disk.
+#[must_use]
+pub fn wants_local_polish_model(config: &Config) -> bool {
+    config.polish.enabled && config.polish.backend == PolishBackend::Local
+}
+
 /// Check every model the current config references and download any that
 /// are missing. Individual failures log a warning but do not abort the
 /// daemon; this is invoked unconditionally from startup and we never
@@ -85,7 +96,7 @@ pub async fn ensure_models(paths: &Paths, config: &Config) -> Result<()> {
             warn!("auto-download of whisper model failed: {e:#}");
         }
     }
-    if config.polish.backend == PolishBackend::Local {
+    if wants_local_polish_model(config) {
         // Boxed: the LLM-ensure future may carry registry/download state
         // large enough to trip stack-frame lints when inlined here.
         if let Err(e) = Box::pin(ensure_local_llm(paths, &config.polish.local.model)).await {
@@ -356,4 +367,37 @@ pub fn local_stt_size_mb(model_name: &str, quantization: &str) -> Option<u32> {
 #[must_use]
 pub fn local_llm_size_mb(model_name: &str) -> Option<u32> {
     fono_polish::LocalLlmRegistry::get(model_name).map(|m| m.approx_mb)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_polish_skips_the_local_model_download() {
+        // Regression: the startup preflight used to gate the polish
+        // weights on the backend alone, so `enabled = false` with the
+        // default `backend = "local"` still pulled the GGUF on every
+        // daemon start.
+        let mut config = Config::default();
+        config.polish.enabled = false;
+        config.polish.backend = PolishBackend::Local;
+        assert!(!wants_local_polish_model(&config));
+    }
+
+    #[test]
+    fn enabled_local_polish_wants_the_model() {
+        let mut config = Config::default();
+        config.polish.enabled = true;
+        config.polish.backend = PolishBackend::Local;
+        assert!(wants_local_polish_model(&config));
+    }
+
+    #[test]
+    fn enabled_cloud_polish_skips_the_local_model() {
+        let mut config = Config::default();
+        config.polish.enabled = true;
+        config.polish.backend = PolishBackend::Anthropic;
+        assert!(!wants_local_polish_model(&config));
+    }
 }
