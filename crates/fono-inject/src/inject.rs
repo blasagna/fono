@@ -120,11 +120,14 @@ impl Injector {
         }
 
         // wtype only works on compositors that implement
-        // zwp_virtual_keyboard_manager_v1 (KWin, wlroots). On
-        // GNOME-Wayland (Mutter) the protocol is absent and wtype
-        // exits 0 silently while typing nothing. Probe the registry
-        // before selecting it; on unsupported compositors fall through
-        // to ydotool / xdotool / clipboard-paste.
+        // zwp_virtual_keyboard_manager_v1 — wlroots (sway / Hyprland /
+        // river / niri) and friends. Neither Mutter (GNOME-Wayland) nor
+        // KWin (KDE-Wayland) advertises it, so on both desktops wtype
+        // types nothing: Mutter drops the keystrokes silently, KWin
+        // makes wtype exit 1 with "Compositor does not support the
+        // virtual keyboard protocol". Probe the registry before
+        // selecting it; on unsupported compositors fall through to
+        // ydotool / xdotool / clipboard-paste.
         if which("wtype").is_some() && crate::wayland_probe::compositor_supports_virtual_keyboard()
         {
             return Self::Wtype;
