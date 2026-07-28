@@ -14,7 +14,9 @@
       "Bash(command *)",
       "Bash(cargo run *)",
       "Bash(cargo check *)",
-      "Bash(gh issue *)"
+      "Bash(gh issue *)",
+      "Bash(fc-list)",
+      "Bash(rpm -qa)"
     ]
   }
 }
