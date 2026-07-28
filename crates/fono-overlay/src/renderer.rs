@@ -163,6 +163,17 @@ pub fn load_system_font() -> Option<ab_glyph::FontArc> {
         "/usr/share/fonts/liberation-sans/LiberationSans-Bold.ttf",
         "/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        // Fedora / RHEL package their fonts one directory per source
+        // RPM, so none of the Debian/Arch layouts above match: the
+        // `google-noto` and `liberation-sans-fonts` directories are
+        // where `dnf install google-noto-sans-fonts liberation-sans-fonts`
+        // actually puts them.
+        "/usr/share/fonts/google-noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
         "/System/Library/Fonts/Helvetica.ttc",
         "/Library/Fonts/Arial.ttf",
         "C:\\Windows\\Fonts\\segoeui.ttf",
@@ -177,11 +188,83 @@ pub fn load_system_font() -> Option<ab_glyph::FontArc> {
             return Some(f);
         }
     }
+    // None of the well-known paths matched. Rather than give up (which
+    // silently renders every panel textless — `rewrap` returns no lines
+    // without a font), sweep the standard font roots for one of the same
+    // families. Distributions keep inventing directory layouts —
+    // Fedora's per-source-RPM directories are why the list above needed
+    // extending — and a shallow scan covers the ones we have not seen.
+    if let Some(f) = scan_font_dirs() {
+        return Some(f);
+    }
+
     tracing::warn!(
         "overlay: no system font found; install dejavu / noto / liberation \
          fonts to enable text rendering"
     );
     None
+}
+
+/// Fallback for [`load_system_font`]: walk the standard font roots
+/// looking for a known-good sans-serif face. Depth-limited so a large
+/// font collection cannot turn overlay startup into a filesystem crawl.
+fn scan_font_dirs() -> Option<ab_glyph::FontArc> {
+    // Ordered by preference; the first family present wins. These are
+    // the same faces the explicit path list targets, matched by file
+    // name so any directory layout works.
+    const WANTED: &[&str] = &[
+        "DejaVuSans-Bold.ttf",
+        "DejaVuSans.ttf",
+        "NotoSans-Bold.ttf",
+        "NotoSans-Regular.ttf",
+        "LiberationSans-Bold.ttf",
+        "LiberationSans-Regular.ttf",
+    ];
+
+    let mut roots = vec![
+        std::path::PathBuf::from("/usr/share/fonts"),
+        std::path::PathBuf::from("/usr/local/share/fonts"),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        roots.push(std::path::Path::new(&home).join(".local/share/fonts"));
+        roots.push(std::path::Path::new(&home).join(".fonts"));
+    }
+
+    for wanted in WANTED {
+        for root in &roots {
+            if let Some(hit) = find_file(root, wanted, 3) {
+                let Ok(bytes) = std::fs::read(&hit) else {
+                    continue;
+                };
+                if let Ok(f) = ab_glyph::FontArc::try_from_vec(bytes) {
+                    tracing::debug!("overlay: loaded font from {}", hit.display());
+                    return Some(f);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Depth-limited search for `name` under `dir`. Unreadable directories
+/// are skipped rather than propagated — font discovery is best-effort.
+fn find_file(dir: &std::path::Path, name: &str, depth: usize) -> Option<std::path::PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut subdirs = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        match entry.file_type() {
+            Ok(t) if t.is_dir() => subdirs.push(path),
+            // Match files (and symlinks into other font packages, which
+            // Fedora's `default/` aliases use) by exact file name.
+            Ok(_) if entry.file_name() == name => return Some(path),
+            _ => {}
+        }
+    }
+    if depth == 0 {
+        return None;
+    }
+    subdirs.iter().find_map(|d| find_file(d, name, depth - 1))
 }
 
 // ---------------------------------------------------------------------------
