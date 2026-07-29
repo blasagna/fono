@@ -350,6 +350,7 @@ fn run_loop(
 ) -> std::io::Result<()> {
     let wl_fd = wayland_shm::wayland_fd(&conn);
     let waker_borrow = waker_read.as_fd();
+
     // Pump the queue once so the initial layer-shell configure shows
     // up and `configured` flips before the orchestrator starts pushing
     // state changes.
@@ -389,20 +390,21 @@ fn run_loop(
             break;
         }
 
-        // 3. Push everything the steps above queued — the re-map
-        //    commit, a resize, a freshly painted buffer — before we
-        //    block.
+        // 3. Push everything the steps above queued — a resize, a
+        //    freshly painted buffer — before we block.
         //
         //    `wayland-client` buffers requests until something flushes
         //    them, and the only other flush is in `dispatch_wayland`,
         //    *after* the poll. Blocking first is a deadlock whenever we
         //    are waiting on a reply to a request still sitting in that
-        //    buffer: `remap()` commits and then waits up to an hour for
-        //    the `configure` that the compositor was never asked for.
-        //    That is the "overlay never comes back after the first
-        //    hide" bug — the thread is alive and parked in `poll`, and
+        //    buffer: the request the compositor would answer has not
+        //    reached it, so nothing ever wakes the poll. That was the
+        //    "overlay never comes back after the first hide" bug on the
+        //    old re-map path — the thread stayed alive, parked in
+        //    `poll` with an hour-long timeout, waiting on a `configure`
+        //    for a commit still sitting in the outgoing buffer, and
         //    only an unrelated waker byte (an audio level, the next
-        //    dictation) shakes it loose.
+        //    dictation) shook it loose.
         if let Err(e) = event_queue.flush() {
             tracing::warn!("overlay(wlr): flush before poll failed: {e}");
         }

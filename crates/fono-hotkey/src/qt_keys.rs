@@ -2,7 +2,7 @@
 //! Translate a parsed Fono hotkey into the integer encoding Qt (and
 //! therefore KDE's `KGlobalAccel`) uses on the wire.
 //!
-//! `org.kde.KGlobalAccel.setShortcutKeys` takes each key combination as
+//! `org.kde.KGlobalAccel.setShortcut` takes each key combination as
 //! a single `int`: the `Qt::Key_*` code bitwise-OR'd with the
 //! `Qt::KeyboardModifier` bits. Values are from `qnamespace.h` and are
 //! ABI-stable across Qt 5 / 6. Sanity check against a live session:
