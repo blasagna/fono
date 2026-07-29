@@ -138,14 +138,6 @@ impl ShmCanvas {
         self.first_paint_done = true;
         Ok(())
     }
-
-    /// Unmap the surface by attaching a null buffer + committing.
-    /// Used by both backends to hide the overlay without tearing
-    /// down the surface.
-    pub fn unmap(surface: &wl_surface::WlSurface) {
-        surface.attach(None, 0, 0);
-        surface.commit();
-    }
 }
 
 /// Outcome of one `drain_commands` pass.

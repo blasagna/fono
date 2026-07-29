@@ -1486,12 +1486,20 @@ fn print_banner(paths: &Paths, config: &Config, verbosity: Verbosity) {
     // where the streaming pipeline is compiled out, so the user can
     // diagnose "I picked Transcript style and nothing happened"
     // without turning on debug logging.
+    //
+    // Two independent switches, reported as one line because users
+    // read them together: `[overlay].waveform` decides whether the
+    // window is shown at all, `[overlay].style` decides what it
+    // draws — and only `Transcript` needs the streaming pipeline.
+    // Reporting just the latter as "live preview: disabled" reads
+    // like "no overlay", which it is not.
     #[cfg(feature = "interactive")]
     {
         info!(
-            "live preview : {} (style={:?})",
-            if config.live_preview() { "enabled" } else { "disabled" },
+            "overlay      : {} (style={:?}, live transcript={})",
+            if config.overlay.waveform { "enabled" } else { "disabled" },
             config.overlay.style,
+            if config.live_preview() { "yes" } else { "no" },
         );
     }
     #[cfg(not(feature = "interactive"))]

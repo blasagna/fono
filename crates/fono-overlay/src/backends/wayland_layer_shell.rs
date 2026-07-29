@@ -15,6 +15,29 @@
 //!   panel sits where the X11 overlay did.
 //! - Empty `wl_region` set as the input region so pointer events
 //!   pass through to the window underneath.
+//! - **The surface is mapped once and stays mapped.** Hiding the
+//!   overlay paints a fully transparent frame; it does not unmap.
+//!
+//! That last point is the hard-won one. Unmapping (attaching a null
+//! buffer) and re-mapping on the next dictation is the obvious way to
+//! do this, and it fails on KDE in a way that is invisible from the
+//! client side: the re-map handshake completes, the compositor sends
+//! `configure`, we attach buffers, KWin *releases* those buffers — and
+//! nothing is on the screen. Three separate attempts to repair the
+//! re-map path (GitHub #4, then a missing flush, then replaying the
+//! full creation-time state, which wlr-layer-shell requires because an
+//! unmapped surface "returns to the state it had right after
+//! `layer_shell.get_layer_surface`") each produced a clean protocol
+//! trace and an invisible overlay. A nested `kwin_wayland` passes every
+//! one of them, in software *and* OpenGL compositing, with and without
+//! a Plasma panel — the failure only reproduces in a real session.
+//!
+//! So don't unmap. A transparent frame is pixel-identical to an
+//! unmapped surface for the user, costs one 640x100 buffer, and has no
+//! state to lose: no re-map, no re-configure, no re-stacking, no
+//! placement decision for the compositor to get wrong. The input region
+//! is already empty, so a hidden overlay swallows no clicks, and the
+//! surface reserves no space (exclusive zone is never set).
 //!
 //! ## Threading
 //!
@@ -113,7 +136,6 @@ pub fn try_spawn(style: WaveformStyle) -> Result<SpawnedBackend, BackendError> {
         configured: false,
         scale: 1,
         exit: false,
-        pending_size: None,
     };
 
     let join = std::thread::Builder::new()
@@ -158,9 +180,6 @@ struct LayerState {
     /// Integer scale advertised by the output the surface is on.
     scale: i32,
     exit: bool,
-    /// Set when the renderer's `target_logical_height()` should be
-    /// pushed to the layer surface on the next loop pass.
-    pending_size: Option<(u32, u32)>,
 }
 
 impl LayerState {
@@ -170,27 +189,8 @@ impl LayerState {
         let (cur_w, cur_h) = self.canvas.dimensions();
         if cur_w != w || cur_h != h {
             self.layer.set_size(w, h);
-            self.pending_size = Some((w, h));
             self.canvas.set_dimensions(w, h);
         }
-    }
-
-    /// Re-map after a hide. Attaching a null buffer (see
-    /// [`ShmCanvas::unmap`]) returns the layer surface to its initial,
-    /// unconfigured state: the protocol then requires a buffer-free
-    /// commit and a fresh `configure` before any buffer may be attached
-    /// again. Painting straight into the old configuration earns a
-    /// `zwlr_layer_surface_v1` `invalid_surface_state` (error 0), which
-    /// kills the connection and takes the overlay thread with it.
-    fn remap(&mut self) {
-        let h = self.renderer.target_logical_height().round() as u32;
-        let w = WIN_WIDTH as u32;
-        self.layer.set_size(w, h);
-        self.canvas.set_dimensions(w, h);
-        self.pending_size = None;
-        // Buffer-free commit: the compositor answers with a configure,
-        // which flips `configured` and drives the first paint.
-        self.layer.commit();
     }
 
     fn paint(&mut self) {
@@ -350,7 +350,6 @@ fn run_loop(
 ) -> std::io::Result<()> {
     let wl_fd = wayland_shm::wayland_fd(&conn);
     let waker_borrow = waker_read.as_fd();
-
     // Pump the queue once so the initial layer-shell configure shows
     // up and `configured` flips before the orchestrator starts pushing
     // state changes.
@@ -363,27 +362,17 @@ fn run_loop(
             state.exit = true;
         }
 
-        // 2. Apply size / visibility transitions.
-        if drain.needs_resize {
-            if state.renderer.is_visible() {
-                if state.configured {
-                    state.request_resize();
-                } else {
-                    // Coming back from a hide: the surface is unmapped
-                    // and unconfigured, so it needs the buffer-free
-                    // commit / configure handshake before it can paint.
-                    state.remap();
-                }
-            } else {
-                // Hidden: unmap the surface so the compositor stops
-                // drawing the rounded panel entirely. The surface drops
-                // back to unconfigured — painting before the next
-                // configure is a protocol error.
-                ShmCanvas::unmap(state.layer.wl_surface());
-                state.configured = false;
-            }
+        // 2. Apply size transitions. Only a visible overlay is sized to
+        //    its content; a hidden one keeps the surface exactly as it
+        //    is, because it is still mapped (see below).
+        if drain.needs_resize && state.renderer.is_visible() {
+            state.request_resize();
         }
-        if drain.needs_redraw && state.renderer.is_visible() {
+        // 3. Repaint — including to hide. `paint_and_present` clears to
+        //    fully transparent and only draws the panel when the
+        //    renderer is visible, so hiding is just a transparent
+        //    frame, and the surface never leaves the mapped state.
+        if drain.needs_redraw {
             state.paint();
         }
         // Self-driven animation pump: the Glass Cortex thinking /
@@ -400,7 +389,25 @@ fn run_loop(
             break;
         }
 
-        // 3. Poll for wayland events / new commands. Only spin at the
+        // 3. Push everything the steps above queued — the re-map
+        //    commit, a resize, a freshly painted buffer — before we
+        //    block.
+        //
+        //    `wayland-client` buffers requests until something flushes
+        //    them, and the only other flush is in `dispatch_wayland`,
+        //    *after* the poll. Blocking first is a deadlock whenever we
+        //    are waiting on a reply to a request still sitting in that
+        //    buffer: `remap()` commits and then waits up to an hour for
+        //    the `configure` that the compositor was never asked for.
+        //    That is the "overlay never comes back after the first
+        //    hide" bug — the thread is alive and parked in `poll`, and
+        //    only an unrelated waker byte (an audio level, the next
+        //    dictation) shakes it loose.
+        if let Err(e) = event_queue.flush() {
+            tracing::warn!("overlay(wlr): flush before poll failed: {e}");
+        }
+
+        // 4. Poll for wayland events / new commands. Only spin at the
         // ~60 fps animation cadence while something is actually
         // animating; otherwise block until the compositor or the
         // orchestrator's waker rouses us, so a static overlay (idle,
@@ -413,7 +420,7 @@ fn run_loop(
         let mut buf = [0u8; 64];
         while rustix::io::read(waker_borrow, &mut buf).map(|n| n > 0).unwrap_or(false) {}
 
-        // 4. Dispatch wayland events.
+        // 5. Dispatch wayland events.
         dispatch_wayland(&conn, &mut event_queue, &mut state)?;
     }
 

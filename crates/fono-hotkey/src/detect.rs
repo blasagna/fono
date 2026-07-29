@@ -5,6 +5,12 @@
 //! Wayland-portal (`xdg-desktop-portal.GlobalShortcuts`) listener at
 //! daemon startup, based on the session environment.
 //!
+//! On Wayland the two big desktops get a native shim ahead of the
+//! portal, because `xdg-desktop-portal` cannot attribute an app id to
+//! an unsandboxed daemon: [`crate::kde_kglobalaccel`] on KDE and
+//! [`crate::gnome_gsettings`] on GNOME. Each falls through to the
+//! portal, and then to X11, if it can't register.
+//!
 //! Auto-detection is the only path users ever hit. The
 //! `FONO_HOTKEY_BACKEND={portal,x11,disabled}` env var is a diagnostic
 //! escape hatch — unknown values fall through to auto-detection with a
@@ -73,9 +79,9 @@ impl HotkeyBackend {
 /// `FONO_HOTKEY_BACKEND` value (`None` = auto-detect).
 ///
 /// Auto-detect matrix (Linux):
-/// - `WAYLAND_DISPLAY` set → `Portal` (the portal listener falls
-///   back gracefully at spawn time if `xdg-desktop-portal-*` isn't
-///   running).
+/// - `WAYLAND_DISPLAY` set → `Portal` (which [`spawn`] may resolve to
+///   the KDE or GNOME shim first; the portal listener also falls back
+///   gracefully at spawn time if `xdg-desktop-portal-*` isn't running).
 /// - `DISPLAY` set, no `WAYLAND_DISPLAY` → `X11`.
 /// - Neither set → `Disabled`.
 ///
@@ -115,6 +121,25 @@ pub fn detect_backend_with(
     }
 }
 
+/// Which backend [`spawn`] will actually try first, phrased for humans
+/// (`fono doctor`). Unlike [`detect_backend`] this names the
+/// desktop-native shims that sit ahead of the portal on KDE and GNOME.
+/// Reads environment variables only — no D-Bus, no side effects.
+#[must_use]
+pub fn describe_backend(forced: Option<HotkeyBackend>) -> &'static str {
+    let backend = detect_backend(forced);
+    #[cfg(target_os = "linux")]
+    if backend == HotkeyBackend::Portal {
+        if crate::kde_kglobalaccel::is_kde_session() {
+            return "KDE KGlobalAccel via KWin (falls back to the portal, then X11)";
+        }
+        if crate::gnome_gsettings::is_gnome_session() {
+            return "GNOME gsettings custom-keybindings (falls back to the portal, then X11)";
+        }
+    }
+    backend.label()
+}
+
 /// Top-level orchestrator: detect, dispatch, return a unified handle.
 pub fn spawn(
     forced: Option<HotkeyBackend>,
@@ -142,9 +167,7 @@ pub fn spawn(
                 // Both surface as scary warns in the log even though
                 // the gsettings shim already handles them. Skip the
                 // portal preflight entirely on GNOME-Wayland and go
-                // straight to the deterministic happy path. The
-                // portal is still attempted on non-GNOME Wayland
-                // compositors (sway, Hyprland, KDE) where it works.
+                // straight to the deterministic happy path.
                 if crate::gnome_gsettings::is_gnome_session() {
                     match crate::gnome_gsettings::spawn(
                         &bindings.dictation,
@@ -167,6 +190,36 @@ pub fn spawn(
                         Err(e) => {
                             tracing::warn!(
                                 "GNOME gsettings install failed: {e:#}; \
+                                 trying portal then X11"
+                            );
+                            // Fall through to the portal attempt
+                            // below — last-resort safety net.
+                        }
+                    }
+                }
+                // KDE-Wayland short-circuit, for the same reason as
+                // GNOME's: xdg-desktop-portal derives an unsandboxed
+                // caller's app id from whatever systemd unit it landed
+                // in, so Fono is either rejected outright
+                // (`org.freedesktop.portal.Error.NotAllowed: An app id
+                // is required`) or has its keys filed under the
+                // terminal that launched it. KWin's own KGlobalAccel
+                // service — the one the KDE portal is implemented on
+                // top of — takes us directly, keeps press *and* release
+                // events, and files the bindings under "Fono".
+                //
+                // The portal remains the path for sway, Hyprland and
+                // wlroots, where it works.
+                if crate::kde_kglobalaccel::is_kde_session() {
+                    match crate::kde_kglobalaccel::spawn(
+                        bindings.clone(),
+                        tx.clone(),
+                        held_flags.clone(),
+                    ) {
+                        Ok(h) => return Ok(Some(h)),
+                        Err(e) => {
+                            tracing::warn!(
+                                "KDE KGlobalAccel registration failed: {e:#}; \
                                  trying portal then X11"
                             );
                             // Fall through to the portal attempt
