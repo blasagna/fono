@@ -1,5 +1,85 @@
 # Fono — Project Status
-Last updated: 2026-07-21
+Last updated: 2026-07-28
+
+## 2026-07-28 — KDE Plasma hotkeys via KGlobalAccel (issue #5)
+
+Fixed global hotkeys on KDE Plasma Wayland, where `portal::spawn` failed its
+preflight and the daemon fell back to the X11 listener — which on a Wayland
+session only sees keys while an Xwayland window has focus.
+
+Root cause (confirmed on Fedora 44 / Plasma 6.7.3): `xdg-desktop-portal`
+derives an unsandboxed caller's app id from the systemd unit it lives in.
+Launched from a terminal, Fono inherits that terminal's scope; launched from
+`fono.service` it has no `app-*` unit at all, so the app id is empty and the
+portal answers `NotAllowed: An app id is required`. The affected machine still
+had the evidence live in KGlobalAccel — Fono's own `dictation` shortcut
+(friendly name "Toggle voice dictation", keys `201326624` = Ctrl+Alt+Space)
+registered under component `org.kde.konsole`. Chasing a valid app id can't fix
+the terminal-launched case, so KDE now bypasses the portal entirely.
+
+- New `crates/fono-hotkey/src/kde_kglobalaccel.rs` — registers with
+  `org.kde.KGlobalAccel` (served by KWin, and what the KDE portal is itself
+  built on) under component `fono`. Unlike the GNOME gsettings shim, which
+  shells out to `fono toggle` and only ever sees a press, KGlobalAccel emits
+  `globalShortcutPressed` **and** `globalShortcutReleased`, so long-press
+  push-to-talk and the dynamic Escape grab both survive.
+- New `qt_keys.rs` — encodes a `ParsedHotkey` as the Qt key int KGlobalAccel
+  wants. Pinned by a test against the value observed on the wire.
+- New `shortcut.rs` — the shortcut ids/descriptions and the short-vs-long press
+  decision, extracted from `portal.rs` so both backends share one copy.
+- `detect.rs` — KDE short-circuit ahead of `portal::spawn`, mirroring the GNOME
+  one; corrected the stale comment claiming the portal "works" on KDE.
+- `fono doctor` — reports the resolved hotkey backend, and warns about Fono
+  shortcuts left registered under another application's component (warn only:
+  the entry lives under someone else's name, so removing it is the user's
+  call).
+
+### Follow-on: overlay stuck after the first hide (layer-shell)
+
+Found while verifying the above, and unrelated to hotkeys. Issue #4's fix
+(2097c2e) stopped the overlay thread from being killed by a protocol error, but
+the overlay still never reappeared after the first hide. The thread was alive
+and parked in `poll()` with a 3600 s timeout (confirmed via
+`/proc/<tid>/syscall`: syscall 7, `timeout=0x36ee80`).
+
+Cause: `run_loop`'s only flush lived in `dispatch_wayland`, *after*
+`poll_event_sources`. `remap()` issues a buffer-free commit and then the loop
+blocks waiting for the `configure` it triggers — but the commit was still
+sitting in `wayland-client`'s outgoing buffer, so the compositor had never been
+asked for anything and had nothing to send. The freshly painted buffer from
+`configure()`'s `paint()` had the same problem. Only an unrelated waker byte
+(an audio level, the next dictation) would shake the loop loose.
+
+Fix 1: flush before blocking, in `wayland_layer_shell.rs::run_loop`. One line
+covers both the re-map commit and the paint.
+
+That got the handshake completing — `WAYLAND_DEBUG` showed a second
+`configure` / `ack_configure` and 61 buffer attaches, where before there was no
+second configure at all — but the overlay still wasn't on screen. Second cause:
+`remap()` re-sent only `set_size`. wlr-layer-shell says an unmapped surface
+"returns to the state it had right after `layer_shell.get_layer_surface`", so
+the anchor, margin, keyboard-interactivity and input region set at creation are
+all gone too. The surface came back unanchored and marginless, so the
+compositor had no reason to place it above the taskbar — the protocol trace
+looked healthy (handshake + buffers) while the overlay sat somewhere the user
+wasn't looking. This is why issue #4's fix appeared to work and didn't.
+
+Fix 2: `remap()` now replays the full creation-time state, in the same order as
+the setup path. Verified on the wire — the re-map block is now
+`set_input_region` / `set_anchor(2)` / `set_keyboard_interactivity(0)` /
+`set_size` / `set_margin(0,0,48,0)` / configure / ack, identical to the initial
+map, with painting in both cycles.
+
+Diagnostic worth remembering: `/proc/<tid>/syscall` on the `fono-overlay-wl`
+thread distinguishes "thread died" from "thread parked" in one command, and
+`WAYLAND_DEBUG=1` diffed between the first map and the re-map is what made the
+missing state obvious.
+
+Wire contract pinned against KF6 `kglobalaccel` / `kglobalacceld` sources:
+`actionId = [componentUnique, actionUnique, componentFriendly, actionFriendly]`;
+`SetShortcutFlag { SetPresent = 2, NoAutoloading = 4, IsDefault = 8 }`. No new
+dependencies — the module goes through `ashpd`'s re-exported zbus/zvariant, so
+the binary gains no second D-Bus stack.
 
 ## 2026-07-21 — Release 0.17.1 (natural multilingual voice by default)
 

@@ -34,12 +34,10 @@
 //! millisecond timestamps from the compositor, so the same logic
 //! applies verbatim — see [`map_event`].
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
 
 use anyhow::{Context, Result};
-use ashpd::desktop::global_shortcuts::{Activated, Deactivated, GlobalShortcuts, NewShortcut};
+use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
 use ashpd::WindowIdentifier;
 use crossbeam_channel::unbounded;
 use futures::stream::StreamExt;
@@ -47,12 +45,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::fsm::HotkeyAction;
-use crate::listener::{HotkeyBindings, HotkeyControl, ListenerHandle, LONG_PRESS_THRESHOLD};
+use crate::listener::{HotkeyBindings, HotkeyControl, ListenerHandle};
+use crate::shortcut::{self, PressTracker};
 use crate::KeyHeldFlags;
-
-const SHORTCUT_DICTATION: &str = "dictation";
-const SHORTCUT_ASSISTANT: &str = "assistant";
-const SHORTCUT_CANCEL: &str = "cancel";
 
 /// Spawn the portal-based listener. Same return shape as
 /// [`crate::listener::spawn`] so the daemon's call site can dispatch on
@@ -165,14 +160,14 @@ async fn run_portal_inner(
     let dictation_trigger = bindings.dictation.trim().to_string();
     if !dictation_trigger.is_empty() {
         shortcuts.push(
-            NewShortcut::new(SHORTCUT_DICTATION, "Toggle voice dictation")
+            NewShortcut::new(shortcut::DICTATION, shortcut::DICTATION_DESC)
                 .preferred_trigger(Some(dictation_trigger.as_str())),
         );
     }
     let assistant_trigger = bindings.assistant.trim().to_string();
     if !assistant_trigger.is_empty() {
         shortcuts.push(
-            NewShortcut::new(SHORTCUT_ASSISTANT, "Toggle voice assistant")
+            NewShortcut::new(shortcut::ASSISTANT, shortcut::ASSISTANT_DESC)
                 .preferred_trigger(Some(assistant_trigger.as_str())),
         );
     }
@@ -243,8 +238,7 @@ async fn run_portal_inner(
     // Per-role press timestamps, mirroring the X11 listener semantics
     // so short-press / long-press behaviour is identical on both
     // backends.
-    let mut dictation_press_at: Option<Instant> = None;
-    let mut assistant_press_at: Option<Instant> = None;
+    let mut presses = PressTracker::new("portal");
 
     // Bridge crossbeam ctrl_rx into the async task without blocking the
     // runtime. A scratch tokio task forwards messages.
@@ -270,13 +264,7 @@ async fn run_portal_inner(
                     debug!("portal: activated stream closed; listener shutting down");
                     break;
                 };
-                if !forward_activated(
-                    &ev,
-                    &mut dictation_press_at,
-                    &mut assistant_press_at,
-                    &held_flags,
-                    &tx,
-                ) {
+                if !presses.pressed(ev.shortcut_id(), &held_flags, &tx) {
                     break;
                 }
             }
@@ -285,13 +273,7 @@ async fn run_portal_inner(
                     debug!("portal: deactivated stream closed; listener shutting down");
                     break;
                 };
-                if !forward_deactivated(
-                    &ev,
-                    &mut dictation_press_at,
-                    &mut assistant_press_at,
-                    &held_flags,
-                    &tx,
-                ) {
+                if !presses.released(ev.shortcut_id(), &held_flags, &tx) {
                     break;
                 }
             }
@@ -341,86 +323,6 @@ async fn run_portal_inner(
     Ok(())
 }
 
-/// Translate an `Activated` portal event into the matching FSM action
-/// and forward it. Returns `false` if the action channel has closed
-/// (caller should shut down).
-fn forward_activated(
-    ev: &Activated,
-    dictation_press_at: &mut Option<Instant>,
-    assistant_press_at: &mut Option<Instant>,
-    held_flags: &KeyHeldFlags,
-    tx: &mpsc::UnboundedSender<HotkeyAction>,
-) -> bool {
-    let action = match ev.shortcut_id() {
-        SHORTCUT_DICTATION => {
-            *dictation_press_at = Some(Instant::now());
-            held_flags.dictation.store(true, Ordering::Relaxed);
-            HotkeyAction::TogglePressed
-        }
-        SHORTCUT_ASSISTANT => {
-            *assistant_press_at = Some(Instant::now());
-            held_flags.assistant.store(true, Ordering::Relaxed);
-            HotkeyAction::AssistantPressed
-        }
-        SHORTCUT_CANCEL => {
-            // Cancel is a single-shot press: no long-press semantics,
-            // no press-timestamp bookkeeping. Mirrors the X11
-            // listener path at `crate::listener::forward_press` for
-            // the cancel role.
-            HotkeyAction::CancelPressed
-        }
-        other => {
-            warn!("portal: unknown shortcut id {other:?} activated; ignoring");
-            return true;
-        }
-    };
-    tracing::debug!("portal Activated {} -> {action:?}", ev.shortcut_id());
-    tx.send(action).is_ok()
-}
-
-/// Translate a `Deactivated` event. Short presses emit no extra
-/// action (recording stays latched on); long presses emit a second
-/// `TogglePressed` / `AssistantPressed` to stop (push-to-talk).
-fn forward_deactivated(
-    ev: &Deactivated,
-    dictation_press_at: &mut Option<Instant>,
-    assistant_press_at: &mut Option<Instant>,
-    held_flags: &KeyHeldFlags,
-    tx: &mpsc::UnboundedSender<HotkeyAction>,
-) -> bool {
-    let (slot, flag, action) = match ev.shortcut_id() {
-        SHORTCUT_DICTATION => {
-            (dictation_press_at, &held_flags.dictation, HotkeyAction::TogglePressed)
-        }
-        SHORTCUT_ASSISTANT => {
-            (assistant_press_at, &held_flags.assistant, HotkeyAction::AssistantPressed)
-        }
-        SHORTCUT_CANCEL => {
-            // Cancel deactivations are no-ops: the cancel action
-            // already fired on `Activated`.
-            return true;
-        }
-        other => {
-            warn!("portal: unknown shortcut id {other:?} deactivated; ignoring");
-            return true;
-        }
-    };
-    flag.store(false, Ordering::Relaxed);
-    let Some(t0) = slot.take() else {
-        return true;
-    };
-    if t0.elapsed() >= LONG_PRESS_THRESHOLD {
-        tracing::debug!(
-            "portal Deactivated {} (held {} ms) -> {action:?}",
-            ev.shortcut_id(),
-            t0.elapsed().as_millis()
-        );
-        return tx.send(action).is_ok();
-    }
-    tracing::debug!("portal Deactivated {} (short press, no synthetic stop)", ev.shortcut_id());
-    true
-}
-
 /// Open a fresh portal session and bind a single `cancel` shortcut to
 /// the configured trigger (typically `Escape`). Called on
 /// `HotkeyControl::EnableCancel`; the returned session is closed again
@@ -434,8 +336,9 @@ async fn open_cancel_session<'a>(
     trigger: &str,
 ) -> Result<Arc<ashpd::desktop::Session<'a, GlobalShortcuts<'a>>>> {
     let session = Arc::new(proxy.create_session().await.context("create cancel session")?);
-    let shortcuts = [NewShortcut::new(SHORTCUT_CANCEL, "Cancel recording / assistant turn")
-        .preferred_trigger(Some(trigger))];
+    let shortcuts =
+        [NewShortcut::new(shortcut::CANCEL, shortcut::CANCEL_DESC)
+            .preferred_trigger(Some(trigger))];
 
     // Re-use the cached approval when present. A fresh session on a
     // backend that persists per-app-id approvals returns the cached

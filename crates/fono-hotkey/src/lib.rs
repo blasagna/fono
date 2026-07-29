@@ -10,9 +10,11 @@
 //!   the `global-hotkey` crate provides the per-OS registration
 //!   backend (X11 `XGrabKey` on Linux, Carbon `RegisterEventHotKey`
 //!   on macOS, Win32 `RegisterHotKey` on Windows).
-//! - [`portal`] (`org.freedesktop.portal.GlobalShortcuts`) and
-//!   [`gnome_gsettings`] are Linux-only desktop integrations, gated
-//!   `#[cfg(target_os = "linux")]` below.
+//! - [`portal`] (`org.freedesktop.portal.GlobalShortcuts`),
+//!   [`gnome_gsettings`], and [`kde_kglobalaccel`]
+//!   (`org.kde.KGlobalAccel`) are Linux-only desktop integrations,
+//!   gated `#[cfg(target_os = "linux")]` below, along with the
+//!   [`shortcut`] vocabulary and [`qt_keys`] encoding they share.
 //!
 //! A Windows port therefore needs no trait split here — only the
 //! `detect::detect_backend` probe learns a new arm (port plan
@@ -22,13 +24,19 @@ pub mod detect;
 pub mod fsm;
 #[cfg(target_os = "linux")]
 pub mod gnome_gsettings;
+#[cfg(target_os = "linux")]
+pub mod kde_kglobalaccel;
 pub mod listener;
 pub mod parse;
 #[cfg(target_os = "linux")]
 pub mod portal;
+#[cfg(target_os = "linux")]
+pub mod qt_keys;
+#[cfg(target_os = "linux")]
+pub mod shortcut;
 pub mod xerror;
 
-pub use detect::{detect_backend, spawn as spawn_with_backend, HotkeyBackend};
+pub use detect::{describe_backend, detect_backend, spawn as spawn_with_backend, HotkeyBackend};
 pub use fsm::{HotkeyAction, HotkeyEvent, RecordingFsm, RecordingMode, State};
 pub use listener::{spawn as spawn_listener, HotkeyBindings, HotkeyControl, ListenerHandle};
 pub use parse::{parse_hotkey, ParsedHotkey};

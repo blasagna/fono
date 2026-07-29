@@ -182,10 +182,30 @@ impl LayerState {
     /// again. Painting straight into the old configuration earns a
     /// `zwlr_layer_surface_v1` `invalid_surface_state` (error 0), which
     /// kills the connection and takes the overlay thread with it.
-    fn remap(&mut self) {
+    ///
+    /// "Initial state" is meant literally — wlr-layer-shell says the
+    /// surface "returns to the state it had right after
+    /// `layer_shell.get_layer_surface`", so **every** property set at
+    /// creation has to be set again, not just the size. Re-sending only
+    /// `set_size` brings the surface back unanchored, with no margin and
+    /// no input region: the compositor no longer has any reason to put
+    /// it above the taskbar at the bottom of the screen, and the
+    /// overlay is simply not where the user is looking. That is the
+    /// "only the first dictation shows the overlay" symptom — the
+    /// handshake completes and buffers are attached, so the protocol
+    /// trace looks healthy, but the surface is misplaced.
+    fn remap(&mut self, qh: &QueueHandle<Self>) {
         let h = self.renderer.target_logical_height().round() as u32;
         let w = WIN_WIDTH as u32;
+        // Same order as the creation path above, so the two can be
+        // compared at a glance.
+        let region = self.compositor.wl_compositor().create_region(qh, ());
+        self.layer.wl_surface().set_input_region(Some(&region));
+        region.destroy();
+        self.layer.set_anchor(Anchor::BOTTOM);
+        self.layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         self.layer.set_size(w, h);
+        self.layer.set_margin(0, 0, BOTTOM_OFFSET as i32, 0);
         self.canvas.set_dimensions(w, h);
         self.pending_size = None;
         // Buffer-free commit: the compositor answers with a configure,
@@ -350,6 +370,8 @@ fn run_loop(
 ) -> std::io::Result<()> {
     let wl_fd = wayland_shm::wayland_fd(&conn);
     let waker_borrow = waker_read.as_fd();
+    // Owned handle, needed by `remap` to build a fresh input region.
+    let qh = event_queue.handle();
 
     // Pump the queue once so the initial layer-shell configure shows
     // up and `configured` flips before the orchestrator starts pushing
@@ -372,7 +394,7 @@ fn run_loop(
                     // Coming back from a hide: the surface is unmapped
                     // and unconfigured, so it needs the buffer-free
                     // commit / configure handshake before it can paint.
-                    state.remap();
+                    state.remap(&qh);
                 }
             } else {
                 // Hidden: unmap the surface so the compositor stops
@@ -400,7 +422,25 @@ fn run_loop(
             break;
         }
 
-        // 3. Poll for wayland events / new commands. Only spin at the
+        // 3. Push everything the steps above queued — the re-map
+        //    commit, a resize, a freshly painted buffer — before we
+        //    block.
+        //
+        //    `wayland-client` buffers requests until something flushes
+        //    them, and the only other flush is in `dispatch_wayland`,
+        //    *after* the poll. Blocking first is a deadlock whenever we
+        //    are waiting on a reply to a request still sitting in that
+        //    buffer: `remap()` commits and then waits up to an hour for
+        //    the `configure` that the compositor was never asked for.
+        //    That is the "overlay never comes back after the first
+        //    hide" bug — the thread is alive and parked in `poll`, and
+        //    only an unrelated waker byte (an audio level, the next
+        //    dictation) shakes it loose.
+        if let Err(e) = event_queue.flush() {
+            tracing::warn!("overlay(wlr): flush before poll failed: {e}");
+        }
+
+        // 4. Poll for wayland events / new commands. Only spin at the
         // ~60 fps animation cadence while something is actually
         // animating; otherwise block until the compositor or the
         // orchestrator's waker rouses us, so a static overlay (idle,
@@ -413,7 +453,7 @@ fn run_loop(
         let mut buf = [0u8; 64];
         while rustix::io::read(waker_borrow, &mut buf).map(|n| n > 0).unwrap_or(false) {}
 
-        // 4. Dispatch wayland events.
+        // 5. Dispatch wayland events.
         dispatch_wayland(&conn, &mut event_queue, &mut state)?;
     }
 

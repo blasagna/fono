@@ -962,6 +962,37 @@ pub fn gather(paths: &Paths, probes_source: impl FnOnce() -> KeyProbes) -> Resul
             }
         }
     }
+    // Which hotkey backend the daemon resolves to. Env-only probe (no
+    // D-Bus), so it stays cheap and matches what `spawn_with_backend`
+    // would pick right now.
+    {
+        let forced = std::env::var("FONO_HOTKEY_BACKEND")
+            .ok()
+            .and_then(|v| fono_hotkey::HotkeyBackend::parse(&v));
+        let backend = fono_hotkey::describe_backend(forced);
+        let forced_note = if forced.is_some() { " [forced via FONO_HOTKEY_BACKEND]" } else { "" };
+        writeln!(out, "{} {backend}{forced_note}", head("Hotkeys     :"))?;
+        col.push(S::Info, "hotkey backend", &format!("{backend}{forced_note}"));
+    }
+    // KDE only: Fono shortcuts left registered under another
+    // application's name by an earlier attempt to bind keys through the
+    // desktop portal, which guesses the app id from whatever launched
+    // the daemon. Plasma may swallow the key before Fono ever sees it.
+    #[cfg(target_os = "linux")]
+    if fono_hotkey::kde_kglobalaccel::is_kde_session() {
+        for s in fono_hotkey::kde_kglobalaccel::find_stray_shortcuts() {
+            let msg = format!(
+                "Fono's {:?} shortcut is registered under {} ({}) — Plasma may swallow that \
+                 key. Remove it with: {}",
+                s.id,
+                s.component_friendly,
+                s.component,
+                s.removal_command()
+            );
+            writeln!(out, "{} {}", head("Stray key   :"), warn(&msg))?;
+            col.push(S::Warn, "stray shortcut", &msg);
+        }
+    }
     writeln!(
         out,
         "{} {} ({})",

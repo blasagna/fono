@@ -93,39 +93,56 @@ your distro's `xwayland` package.
 ## Global hotkeys
 
 Wayland compositors don't expose X11's `XGrabKey` API, so Fono uses
-a three-tier resolver picked automatically based on what the session
+a four-tier resolver picked automatically based on what the session
 advertises (set `FONO_HOTKEY_BACKEND=portal|x11|disabled` to
 override for diagnostics):
 
-1. **`xdg-desktop-portal.GlobalShortcuts`** — preferred on every
-   Wayland session that ships it. One consent dialog at first launch
-   binds both the dictation and assistant keys for the lifetime of
-   the install; subsequent launches reuse the cached approval
-   silently. Works out-of-the-box on:
-   * KDE Plasma 5.27+ / 6.x (`xdg-desktop-portal-kde`)
-   * Hyprland (`xdg-desktop-portal-hyprland`)
-   * sway / wlroots with `xdg-desktop-portal-wlr`
-   * GNOME 47+ (`xdg-desktop-portal-gnome` 47 added GlobalShortcuts)
+1. **KDE: `org.kde.KGlobalAccel`** — on Plasma, Fono registers its keys
+   with KWin directly, the same service the KDE portal is built on.
+   They appear under **Fono** in System Settings → Shortcuts, and this
+   path keeps the full press/release behaviour, so long-press
+   push-to-talk and the dynamic Escape grab both work.
 
-2. **gsettings custom-keybindings** — automatic fallback for
-   **GNOME 46** (the default on Ubuntu 24.04, whose
-   `xdg-desktop-portal-gnome` 46 doesn't yet expose GlobalShortcuts).
-   Fono writes the `dictation` and `assistant` bindings into
+   Why not the portal here: `xdg-desktop-portal` derives an unsandboxed
+   caller's app id from whatever systemd unit it happens to be in.
+   Started from a terminal, Fono inherits *that terminal's* identity;
+   started from `fono.service` it has none at all, and the portal
+   answers `NotAllowed: An app id is required`. See
+   [troubleshooting](troubleshooting.md#kde-hotkeys-dont-fire-or-only-work-in-some-windows).
+
+2. **GNOME: gsettings custom-keybindings** — automatic on GNOME, whose
+   portal rejects unsandboxed callers for the same app-id reason (and
+   on GNOME 46, the default on Ubuntu 24.04, doesn't implement
+   GlobalShortcuts at all). Fono writes the `dictation` and `assistant`
+   bindings into
    `org.gnome.settings-daemon.plugins.media-keys.custom-keybindings`
    pointing at `fono toggle` and `fono assistant`; the CLI then
    routes the action through IPC to the running daemon. Press /
    release semantics are lost on this path (no long-press
    push-to-talk), but the toggle behaviour works.
 
-3. **X11 / Xwayland listener** — the X11-only `global-hotkey` crate
-   path, used when neither portal nor gsettings is available
-   (typically bare wlroots setups without `xdg-desktop-portal-wlr`,
-   or sessions where Xwayland is reachable but the Wayland portal
-   isn't).
+3. **`xdg-desktop-portal.GlobalShortcuts`** — the path for every other
+   Wayland session. One consent dialog at first launch binds both the
+   dictation and assistant keys for the lifetime of the install;
+   subsequent launches reuse the cached approval silently. Works
+   out-of-the-box on:
+   * Hyprland (`xdg-desktop-portal-hyprland`)
+   * sway / wlroots with `xdg-desktop-portal-wlr`
 
-`fono doctor` reports which backend was selected and why. If the
-portal binding dialog never appears or the keys don't fire, you can
-always **fall back to a manual compositor binding** as a last resort:
+   It is also tried on KDE and GNOME if the native path above fails.
+
+4. **X11 / Xwayland listener** — the X11-only `global-hotkey` crate
+   path, used when nothing above is available (typically bare wlroots
+   setups without `xdg-desktop-portal-wlr`, or sessions where Xwayland
+   is reachable but the Wayland portal isn't). On a Wayland session
+   this only sees keys while an Xwayland window has focus, so it is a
+   genuine last resort.
+
+`fono doctor` reports which backend was selected on its `Hotkeys` line.
+If the portal binding dialog never appears or the keys don't fire, you
+can always **fall back to a manual compositor binding** as a last
+resort — at the cost of push-to-talk, since a command binding only
+fires on press:
 
 ```
 # sway (~/.config/sway/config)
