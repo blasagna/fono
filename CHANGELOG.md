@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Global hotkeys now work on KDE Plasma Wayland.** Fono asks Plasma directly
+  for its shortcuts instead of going through a desktop portal that refuses
+  unsandboxed applications. Previously the keys quietly fell back to an X11 path
+  that only noticed them while an older X11 window happened to be focused, so
+  dictation would work in some windows and do nothing in others. Fono now also
+  appears under its own name in System Settings → Shortcuts, and `fono doctor`
+  points out any leftover Fono shortcuts the old path filed under another
+  application's name.
+- **The recording overlay comes back every time.** It used to appear for the
+  first dictation after starting Fono and never again. Nothing else changes —
+  it looks and behaves exactly as before.
+
 ## [0.17.1] — 2026-07-22
 
 ### Changed

@@ -15,6 +15,29 @@
 //!   panel sits where the X11 overlay did.
 //! - Empty `wl_region` set as the input region so pointer events
 //!   pass through to the window underneath.
+//! - **The surface is mapped once and stays mapped.** Hiding the
+//!   overlay paints a fully transparent frame; it does not unmap.
+//!
+//! That last point is the hard-won one. Unmapping (attaching a null
+//! buffer) and re-mapping on the next dictation is the obvious way to
+//! do this, and it fails on KDE in a way that is invisible from the
+//! client side: the re-map handshake completes, the compositor sends
+//! `configure`, we attach buffers, KWin *releases* those buffers — and
+//! nothing is on the screen. Three separate attempts to repair the
+//! re-map path (GitHub #4, then a missing flush, then replaying the
+//! full creation-time state, which wlr-layer-shell requires because an
+//! unmapped surface "returns to the state it had right after
+//! `layer_shell.get_layer_surface`") each produced a clean protocol
+//! trace and an invisible overlay. A nested `kwin_wayland` passes every
+//! one of them, in software *and* OpenGL compositing, with and without
+//! a Plasma panel — the failure only reproduces in a real session.
+//!
+//! So don't unmap. A transparent frame is pixel-identical to an
+//! unmapped surface for the user, costs one 640x100 buffer, and has no
+//! state to lose: no re-map, no re-configure, no re-stacking, no
+//! placement decision for the compositor to get wrong. The input region
+//! is already empty, so a hidden overlay swallows no clicks, and the
+//! surface reserves no space (exclusive zone is never set).
 //!
 //! ## Threading
 //!
@@ -113,7 +136,6 @@ pub fn try_spawn(style: WaveformStyle) -> Result<SpawnedBackend, BackendError> {
         configured: false,
         scale: 1,
         exit: false,
-        pending_size: None,
     };
 
     let join = std::thread::Builder::new()
@@ -158,9 +180,6 @@ struct LayerState {
     /// Integer scale advertised by the output the surface is on.
     scale: i32,
     exit: bool,
-    /// Set when the renderer's `target_logical_height()` should be
-    /// pushed to the layer surface on the next loop pass.
-    pending_size: Option<(u32, u32)>,
 }
 
 impl LayerState {
@@ -170,47 +189,8 @@ impl LayerState {
         let (cur_w, cur_h) = self.canvas.dimensions();
         if cur_w != w || cur_h != h {
             self.layer.set_size(w, h);
-            self.pending_size = Some((w, h));
             self.canvas.set_dimensions(w, h);
         }
-    }
-
-    /// Re-map after a hide. Attaching a null buffer (see
-    /// [`ShmCanvas::unmap`]) returns the layer surface to its initial,
-    /// unconfigured state: the protocol then requires a buffer-free
-    /// commit and a fresh `configure` before any buffer may be attached
-    /// again. Painting straight into the old configuration earns a
-    /// `zwlr_layer_surface_v1` `invalid_surface_state` (error 0), which
-    /// kills the connection and takes the overlay thread with it.
-    ///
-    /// "Initial state" is meant literally — wlr-layer-shell says the
-    /// surface "returns to the state it had right after
-    /// `layer_shell.get_layer_surface`", so **every** property set at
-    /// creation has to be set again, not just the size. Re-sending only
-    /// `set_size` brings the surface back unanchored, with no margin and
-    /// no input region: the compositor no longer has any reason to put
-    /// it above the taskbar at the bottom of the screen, and the
-    /// overlay is simply not where the user is looking. That is the
-    /// "only the first dictation shows the overlay" symptom — the
-    /// handshake completes and buffers are attached, so the protocol
-    /// trace looks healthy, but the surface is misplaced.
-    fn remap(&mut self, qh: &QueueHandle<Self>) {
-        let h = self.renderer.target_logical_height().round() as u32;
-        let w = WIN_WIDTH as u32;
-        // Same order as the creation path above, so the two can be
-        // compared at a glance.
-        let region = self.compositor.wl_compositor().create_region(qh, ());
-        self.layer.wl_surface().set_input_region(Some(&region));
-        region.destroy();
-        self.layer.set_anchor(Anchor::BOTTOM);
-        self.layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-        self.layer.set_size(w, h);
-        self.layer.set_margin(0, 0, BOTTOM_OFFSET as i32, 0);
-        self.canvas.set_dimensions(w, h);
-        self.pending_size = None;
-        // Buffer-free commit: the compositor answers with a configure,
-        // which flips `configured` and drives the first paint.
-        self.layer.commit();
     }
 
     fn paint(&mut self) {
@@ -370,9 +350,6 @@ fn run_loop(
 ) -> std::io::Result<()> {
     let wl_fd = wayland_shm::wayland_fd(&conn);
     let waker_borrow = waker_read.as_fd();
-    // Owned handle, needed by `remap` to build a fresh input region.
-    let qh = event_queue.handle();
-
     // Pump the queue once so the initial layer-shell configure shows
     // up and `configured` flips before the orchestrator starts pushing
     // state changes.
@@ -385,27 +362,17 @@ fn run_loop(
             state.exit = true;
         }
 
-        // 2. Apply size / visibility transitions.
-        if drain.needs_resize {
-            if state.renderer.is_visible() {
-                if state.configured {
-                    state.request_resize();
-                } else {
-                    // Coming back from a hide: the surface is unmapped
-                    // and unconfigured, so it needs the buffer-free
-                    // commit / configure handshake before it can paint.
-                    state.remap(&qh);
-                }
-            } else {
-                // Hidden: unmap the surface so the compositor stops
-                // drawing the rounded panel entirely. The surface drops
-                // back to unconfigured — painting before the next
-                // configure is a protocol error.
-                ShmCanvas::unmap(state.layer.wl_surface());
-                state.configured = false;
-            }
+        // 2. Apply size transitions. Only a visible overlay is sized to
+        //    its content; a hidden one keeps the surface exactly as it
+        //    is, because it is still mapped (see below).
+        if drain.needs_resize && state.renderer.is_visible() {
+            state.request_resize();
         }
-        if drain.needs_redraw && state.renderer.is_visible() {
+        // 3. Repaint — including to hide. `paint_and_present` clears to
+        //    fully transparent and only draws the panel when the
+        //    renderer is visible, so hiding is just a transparent
+        //    frame, and the surface never leaves the mapped state.
+        if drain.needs_redraw {
             state.paint();
         }
         // Self-driven animation pump: the Glass Cortex thinking /

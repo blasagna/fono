@@ -115,12 +115,50 @@ a pass.
 the overlay has a real Plasma panel — another layer-shell surface, anchored to
 the same screen edge — to be stacked against. It passes there too.
 
-**Result: on this KWin (6.7.3), the layer-shell backend is correct.** The
-overlay maps, re-maps in the right place and unmaps cleanly on every cycle, with
-and without a panel. If a second dictation still shows nothing on the live
-session, the cause is above the backend — in what the daemon sends it — and that
-is where the next session should look: `RUST_LOG=debug` on the daemon across two
-dictations, checking that the second one reaches `set_state(Recording)` at all.
+**Result: on a nested KWin (6.7.3) the re-map path is correct** — the overlay
+maps, re-maps in the right place and unmaps cleanly on every cycle, with and
+without a panel. On the real session it was still invisible from the second
+show onward. Read the next section before trusting a pass from this harness.
+
+### Resolution: stop unmapping (the harness was measuring the wrong compositor)
+
+Running the probe directly against the live session — no daemon, no hotkeys, no
+audio — reproduced the bug in 15 seconds, which finally separated "the backend"
+from "what the daemon sends it". It is the backend.
+
+`WAYLAND_DEBUG=1` on that live run showed the client doing everything right, and
+identically on every cycle: full creation-time state replayed, `configure` /
+`ack_configure` received, buffers created, attached, committed — and *released by
+KWin*, which means the compositor consumed them. Renderer phases cycled
+correctly too (`Idle → Listening → Thinking → Idle`, three times). No `closed`,
+no protocol error. Nothing on screen from the second show onward.
+
+So the re-map is unfixable from the client side: three attempts (#4, the missing
+flush, the full state replay) each produced a clean trace and an invisible
+overlay. The nested compositor passes all of them — in software *and* OpenGL
+compositing (`FONO_PROBE_HOST_DISPLAY=wayland-0` runs the nested KWin as a
+window in the host session, which uses the real GL path), with and without a
+Plasma panel. Whatever KWin does differently for a re-mapped layer surface in a
+real session, it does not reproduce in a nested one.
+
+Fix: **don't unmap.** Hiding now paints a fully transparent frame; the surface
+is mapped once at startup and stays mapped for the daemon's lifetime. This
+deletes the failure mode instead of patching it — no re-map, so no configure
+handshake to get wrong, no creation-time state to replay, and no chance for the
+compositor to re-place or re-stack the surface. `remap()`, `ShmCanvas::unmap()`
+and the write-only `pending_size` field are gone. Cost is one idle 640x100
+buffer; the input region is already empty so a hidden overlay swallows no
+clicks, and no exclusive zone is ever set so it reserves no space.
+
+Verified by eye on the live session: three shows, three hides, all visible.
+
+Lesson for the harness: it passed on every version of the broken code, because
+the bug lived in the one thing a nested compositor does not reproduce. It is
+still worth having — it catches misplacement, and it proved the hide still hides
+after this change — but for this class of bug the 15-second live probe
+(`FONO_OVERLAY_BACKEND=wlr cargo run -p fono-overlay --example
+overlay_show_hide_probe --features backend-wlr`) is the instrument that actually
+answers the question.
 
 Wire contract pinned against KF6 `kglobalaccel` / `kglobalacceld` sources:
 `actionId = [componentUnique, actionUnique, componentFriendly, actionFriendly]`;

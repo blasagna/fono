@@ -97,11 +97,32 @@ chmod 700 "$OUT/run"
 # ---------------------------------------------------------------------
 cat > "$OUT/session.sh" << 'INNER'
 set -uo pipefail
-export XDG_RUNTIME_DIR="$OUT/run"
 export XDG_CURRENT_DESKTOP=KDE
-unset WAYLAND_DISPLAY DISPLAY
 
-kwin_wayland --virtual --width "$W" --height "$H" --no-lockscreen \
+# Two ways to host the nested compositor:
+#
+#   --virtual (default)  renders to a virtual framebuffer, offscreen and
+#                        fully isolated. But KWin composites it in
+#                        software, and software compositing turns
+#                        *animations off* — so the map/unmap effects
+#                        that a real session applies to a layer surface
+#                        never run here.
+#   FONO_PROBE_HOST_DISPLAY=wayland-0
+#                        runs the nested KWin as a window inside the
+#                        host session, which puts it on the same OpenGL
+#                        path (and therefore the same effects) as the
+#                        real desktop. Visible on screen while it runs;
+#                        capture is still of the nested output only.
+if [ -n "${FONO_PROBE_HOST_DISPLAY:-}" ]; then
+    export WAYLAND_DISPLAY="$FONO_PROBE_HOST_DISPLAY"
+    BACKEND=(--wayland-display "$FONO_PROBE_HOST_DISPLAY")
+else
+    export XDG_RUNTIME_DIR="$OUT/run"
+    unset WAYLAND_DISPLAY DISPLAY
+    BACKEND=(--virtual)
+fi
+
+kwin_wayland "${BACKEND[@]}" --width "$W" --height "$H" --no-lockscreen \
     --socket fono-verify > "$OUT/kwin.log" 2>&1 &
 KWIN=$!
 trap 'kill $KWIN 2>/dev/null' EXIT

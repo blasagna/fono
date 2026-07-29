@@ -79,6 +79,19 @@ This exists because the overlay has broken three times in ways a protocol
 trace could not distinguish from working: never coming back after a hide,
 coming back in the wrong place, and never going away.
 
+Know its limit, though: a nested compositor did **not** reproduce the KDE bug
+where a re-mapped layer surface is never presented — that one only ever showed
+up in a real session. When the question is "is it on my screen right now", run
+the probe against your own session and watch:
+
+```bash
+FONO_OVERLAY_BACKEND=wlr cargo run -p fono-overlay \
+  --example overlay_show_hide_probe --features backend-wlr
+```
+
+No daemon, no hotkeys, no audio — just the overlay, shown and hidden three
+times. It is the fastest way to tell a backend bug from a daemon bug.
+
 ### Troubleshooting
 
 1. **`fono doctor` reports backend `noop` on a Wayland session.**
