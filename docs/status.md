@@ -75,6 +75,53 @@ thread distinguishes "thread died" from "thread parked" in one command, and
 `WAYLAND_DEBUG=1` diffed between the first map and the re-map is what made the
 missing state obvious.
 
+### Follow-on: an automated check for "does the overlay actually appear"
+
+Both fixes above were verified by reading protocol traces, which is exactly how
+Fix 1 came to look complete while the overlay was still invisible: the wire log
+of a correct handshake and the wire log of a correctly-handshaken surface in the
+wrong place are the same log. The only honest question is whether the pixels are
+on the screen, and answering it by hand means dictating twice and looking —
+slow, unrepeatable, and it means screenshotting a live desktop.
+
+`tests/overlay-show-hide-check.sh` answers it offline in ~14 s:
+
+1. `kwin_wayland --virtual` on a private D-Bus session and a private
+   `XDG_RUNTIME_DIR` — the real compositor this bug is about, rendering to a
+   virtual framebuffer with no outputs, no input and no contact with the running
+   desktop. The nested KWin hosts its own `org.kde.KWin.ScreenShot2`, so
+   `spectacle` inside that session can only ever capture the nested output.
+2. `examples/overlay_show_hide_probe` drives the overlay through the states
+   `session.rs` drives for a dictation — Recording (with levels, samples and FFT
+   bins pushed at the daemon's cadence) → Processing → Polishing → Hidden —
+   three times over, cueing the harness at each steady state.
+3. Each frame is diffed against a baseline captured while hidden. A visible
+   phase has to change the overlay's rectangle and nothing else; a hidden phase
+   has to change nothing. The rectangle comes from the probe (which reads
+   `WIN_WIDTH` / `target_logical_height()` / `BOTTOM_OFFSET` out of the
+   renderer) rather than from a copy of those constants in the script.
+
+The frame size is asserted against the nested output's size, so a capture that
+came from anywhere else is refused rather than analysed.
+
+Validated by sabotage, which is the part that matters: reverting `remap()` to
+size-only makes it report *"overlay is on screen but not in its rectangle
+(stray: 640x100+640+490)"*, and removing the pre-poll flush makes it report
+*"overlay still on screen after hide"*. A harness that passes on the broken code
+is worth nothing, so both regressions are checked to still fail before trusting
+a pass.
+
+`FONO_PROBE_PANEL=1` additionally starts `plasmashell` in the nested session, so
+the overlay has a real Plasma panel — another layer-shell surface, anchored to
+the same screen edge — to be stacked against. It passes there too.
+
+**Result: on this KWin (6.7.3), the layer-shell backend is correct.** The
+overlay maps, re-maps in the right place and unmaps cleanly on every cycle, with
+and without a panel. If a second dictation still shows nothing on the live
+session, the cause is above the backend — in what the daemon sends it — and that
+is where the next session should look: `RUST_LOG=debug` on the daemon across two
+dictations, checking that the second one reaches `set_state(Recording)` at all.
+
 Wire contract pinned against KF6 `kglobalaccel` / `kglobalacceld` sources:
 `actionId = [componentUnique, actionUnique, componentFriendly, actionFriendly]`;
 `SetShortcutFlag { SetPresent = 2, NoAutoloading = 4, IsDefault = 8 }`. No new

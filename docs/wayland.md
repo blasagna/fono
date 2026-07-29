@@ -64,6 +64,21 @@ On a Wayland session with neither layer-shell nor Xwayland, the
 backend will be `noop` and `fono doctor` will print a hint to install
 your distro's `xwayland` package.
 
+### Checking the overlay really appears (developers)
+
+`fono doctor` reports which backend was *selected*, not whether anything
+reached the screen. For that there is `tests/overlay-show-hide-check.sh`, which
+runs the overlay through several show/hide cycles inside a nested headless
+`kwin_wayland` on a private D-Bus session and screenshots each phase, then
+checks that the panel occupied its rectangle when shown and nothing when
+hidden. It never touches your live session. `FONO_PROBE_PANEL=1` adds a
+`plasmashell` panel to the nested session so the overlay has a real
+layer-shell neighbour to be stacked against.
+
+This exists because the overlay has broken three times in ways a protocol
+trace could not distinguish from working: never coming back after a hide,
+coming back in the wrong place, and never going away.
+
 ### Troubleshooting
 
 1. **`fono doctor` reports backend `noop` on a Wayland session.**
