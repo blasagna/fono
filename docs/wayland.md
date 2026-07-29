@@ -64,34 +64,6 @@ On a Wayland session with neither layer-shell nor Xwayland, the
 backend will be `noop` and `fono doctor` will print a hint to install
 your distro's `xwayland` package.
 
-### Checking the overlay really appears (developers)
-
-`fono doctor` reports which backend was *selected*, not whether anything
-reached the screen. For that there is `tests/overlay-show-hide-check.sh`, which
-runs the overlay through several show/hide cycles inside a nested headless
-`kwin_wayland` on a private D-Bus session and screenshots each phase, then
-checks that the panel occupied its rectangle when shown and nothing when
-hidden. It never touches your live session. `FONO_PROBE_PANEL=1` adds a
-`plasmashell` panel to the nested session so the overlay has a real
-layer-shell neighbour to be stacked against.
-
-This exists because the overlay has broken three times in ways a protocol
-trace could not distinguish from working: never coming back after a hide,
-coming back in the wrong place, and never going away.
-
-Know its limit, though: a nested compositor did **not** reproduce the KDE bug
-where a re-mapped layer surface is never presented — that one only ever showed
-up in a real session. When the question is "is it on my screen right now", run
-the probe against your own session and watch:
-
-```bash
-FONO_OVERLAY_BACKEND=wlr cargo run -p fono-overlay \
-  --example overlay_show_hide_probe --features backend-wlr
-```
-
-No daemon, no hotkeys, no audio — just the overlay, shown and hidden three
-times. It is the fastest way to tell a backend bug from a daemon bug.
-
 ### Troubleshooting
 
 1. **`fono doctor` reports backend `noop` on a Wayland session.**
@@ -121,56 +93,39 @@ times. It is the fastest way to tell a backend bug from a daemon bug.
 ## Global hotkeys
 
 Wayland compositors don't expose X11's `XGrabKey` API, so Fono uses
-a four-tier resolver picked automatically based on what the session
+a three-tier resolver picked automatically based on what the session
 advertises (set `FONO_HOTKEY_BACKEND=portal|x11|disabled` to
 override for diagnostics):
 
-1. **KDE: `org.kde.KGlobalAccel`** — on Plasma, Fono registers its keys
-   with KWin directly, the same service the KDE portal is built on.
-   They appear under **Fono** in System Settings → Shortcuts, and this
-   path keeps the full press/release behaviour, so long-press
-   push-to-talk and the dynamic Escape grab both work.
+1. **`xdg-desktop-portal.GlobalShortcuts`** — preferred on every
+   Wayland session that ships it. One consent dialog at first launch
+   binds both the dictation and assistant keys for the lifetime of
+   the install; subsequent launches reuse the cached approval
+   silently. Works out-of-the-box on:
+   * KDE Plasma 5.27+ / 6.x (`xdg-desktop-portal-kde`)
+   * Hyprland (`xdg-desktop-portal-hyprland`)
+   * sway / wlroots with `xdg-desktop-portal-wlr`
+   * GNOME 47+ (`xdg-desktop-portal-gnome` 47 added GlobalShortcuts)
 
-   Why not the portal here: `xdg-desktop-portal` derives an unsandboxed
-   caller's app id from whatever systemd unit it happens to be in.
-   Started from a terminal, Fono inherits *that terminal's* identity;
-   started from `fono.service` it has none at all, and the portal
-   answers `NotAllowed: An app id is required`. See
-   [troubleshooting](troubleshooting.md#kde-hotkeys-dont-fire-or-only-work-in-some-windows).
-
-2. **GNOME: gsettings custom-keybindings** — automatic on GNOME, whose
-   portal rejects unsandboxed callers for the same app-id reason (and
-   on GNOME 46, the default on Ubuntu 24.04, doesn't implement
-   GlobalShortcuts at all). Fono writes the `dictation` and `assistant`
-   bindings into
+2. **gsettings custom-keybindings** — automatic fallback for
+   **GNOME 46** (the default on Ubuntu 24.04, whose
+   `xdg-desktop-portal-gnome` 46 doesn't yet expose GlobalShortcuts).
+   Fono writes the `dictation` and `assistant` bindings into
    `org.gnome.settings-daemon.plugins.media-keys.custom-keybindings`
    pointing at `fono toggle` and `fono assistant`; the CLI then
    routes the action through IPC to the running daemon. Press /
    release semantics are lost on this path (no long-press
    push-to-talk), but the toggle behaviour works.
 
-3. **`xdg-desktop-portal.GlobalShortcuts`** — the path for every other
-   Wayland session. One consent dialog at first launch binds both the
-   dictation and assistant keys for the lifetime of the install;
-   subsequent launches reuse the cached approval silently. Works
-   out-of-the-box on:
-   * Hyprland (`xdg-desktop-portal-hyprland`)
-   * sway / wlroots with `xdg-desktop-portal-wlr`
+3. **X11 / Xwayland listener** — the X11-only `global-hotkey` crate
+   path, used when neither portal nor gsettings is available
+   (typically bare wlroots setups without `xdg-desktop-portal-wlr`,
+   or sessions where Xwayland is reachable but the Wayland portal
+   isn't).
 
-   It is also tried on KDE and GNOME if the native path above fails.
-
-4. **X11 / Xwayland listener** — the X11-only `global-hotkey` crate
-   path, used when nothing above is available (typically bare wlroots
-   setups without `xdg-desktop-portal-wlr`, or sessions where Xwayland
-   is reachable but the Wayland portal isn't). On a Wayland session
-   this only sees keys while an Xwayland window has focus, so it is a
-   genuine last resort.
-
-`fono doctor` reports which backend was selected on its `Hotkeys` line.
-If the portal binding dialog never appears or the keys don't fire, you
-can always **fall back to a manual compositor binding** as a last
-resort — at the cost of push-to-talk, since a command binding only
-fires on press:
+`fono doctor` reports which backend was selected and why. If the
+portal binding dialog never appears or the keys don't fire, you can
+always **fall back to a manual compositor binding** as a last resort:
 
 ```
 # sway (~/.config/sway/config)

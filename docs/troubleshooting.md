@@ -190,50 +190,6 @@ as a raw `X Error of failed request: BadAccess … X_GrabKey` line on
 stderr without a tracing prefix; if you upgrade and still see the raw
 form, you're running an older daemon — `pkill fono` and start fresh.
 
-### KDE: hotkeys don't fire, or only work in some windows
-
-Symptom: the keys work in a terminal but do nothing over Dolphin or
-Firefox, dictation appears to work once and then goes dead, or a
-printable binding like `Meta+Z` types its character into the focused
-window instead of starting a recording. The log shows:
-
-```
-WARN portal hotkey backend unavailable: portal CreateSession failed:
-     ZBus Error: org.freedesktop.portal.Error.NotAllowed: An app id is required
-WARN falling back to X11 listener (Xwayland-only events)
-```
-
-Fono now registers with Plasma directly (`org.kde.KGlobalAccel`) rather
-than through the portal, so this should not happen — check
-`fono doctor`, whose `Hotkeys` line should read *KDE KGlobalAccel via
-KWin*. If it doesn't, you're on an older build; upgrade with
-`fono update`.
-
-One thing an older build can leave behind: because the portal guesses an
-unsandboxed app's identity from whatever launched it, your Fono
-shortcut may be filed under the terminal you started Fono from. Plasma
-then swallows the key before Fono sees it. `fono doctor` flags these on
-a `Stray key` line. To check by hand:
-
-```sh
-grep -B2 -i 'toggle voice dictation' ~/.config/kglobalshortcutsrc
-```
-
-If that shows the binding under something other than `[fono]` — e.g.
-`[org.kde.konsole]` — remove that one entry:
-
-```sh
-busctl --user call org.kde.kglobalaccel /kglobalaccel \
-  org.kde.KGlobalAccel unregister ss "org.kde.konsole" "dictation"
-```
-
-Fono deliberately never deletes these itself: the entry lives under
-another application's name, so removing it is your call.
-
-Fono's own bindings show up under **Fono** in System Settings →
-Shortcuts, where you can also see whether the combination you chose is
-already claimed by something else.
-
 ### Wayland (sway, Hyprland, KDE-Wayland, GNOME-Wayland)
 
 Most Wayland compositors don't deliver global keys to applications. Bind
